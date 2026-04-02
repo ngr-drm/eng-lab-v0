@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: api
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: 6379
+server:
+  port: 8080
+
+payment:
+  processor:
+    default:
+      url: ${PROCESSOR_DEFAULT_URL:http://localhost:8001}
+    fallback:
+      url: ${PROCESSOR_FALLBACK_URL:http://localhost:8002}

@@ -1,0 +1,84 @@
+x-service-templates: &instance-build
+  #image: sure44e/rinha-debut:latest
+  build: .
+  depends_on:
+    redis:
+      condition: service_healthy
+  deploy:
+    resources:
+      limits:
+        cpus: "0.55"
+        memory: "130MB"
+  environment:
+    REDIS_HOST: redis
+    PROCESSOR_DEFAULT_URL: http://payment-processor-default:8080
+    PROCESSOR_FALLBACK_URL: http://payment-processor-fallback:8080
+  networks:
+    - api
+    - payment-processor
+
+services:
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: haproxy
+    command: [ "haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg", "-W" ]
+    ports:
+      - "9999:80"
+    volumes:
+      - ./config/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - api
+    depends_on:
+      - instance-1
+      - instance-2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "20MB"
+
+  instance-1:
+    <<: *instance-build
+    container_name: instance-1
+    hostname: instance-1
+
+  instance-2:
+    <<: *instance-build
+    container_name: instance-2
+    hostname: instance-2
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 55mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - api
+    deploy:
+      resources:
+        limits:
+          cpus: "0.30"
+          memory: "80MB"
+
+networks:
+  api:
+    name: api
+    driver: bridge
+  payment-processor:
+    external: true
+
+
+
+
+
