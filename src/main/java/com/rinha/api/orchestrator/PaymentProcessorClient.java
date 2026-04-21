@@ -35,7 +35,7 @@ public class PaymentProcessorClient {
                 .onStatus(HttpStatusCode::is5xxServerError,
                         resp -> Mono.error(new RuntimeException("processor-error-" + type)))
                 .bodyToMono(Void.class)
-                .timeout(Duration.ofSeconds(10));
+                .timeout(Duration.ofSeconds(2));
     }
 
     public Mono<PaymentDTO.ServiceHealth> checkHealth(PaymentDTO.ProcessorType type) {
@@ -46,7 +46,7 @@ public class PaymentProcessorClient {
                 .onStatus(status -> status.value() == 429,
                         resp -> Mono.error(new RateLimitException()))
                 .bodyToMono(PaymentDTO.ServiceHealth.class)
-                .timeout(Duration.ofSeconds(10))
+                .timeout(Duration.ofSeconds(3))
                 .onErrorResume(e -> {
                     if (e instanceof RateLimitException) return Mono.error(e);
                     return Mono.just(new PaymentDTO.ServiceHealth(true, 9999));

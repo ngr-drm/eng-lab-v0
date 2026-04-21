@@ -69,7 +69,7 @@ services:
       resources:
         limits:
           cpus: "0.30"
-          memory: "80MB"
+          memory: "60MB"
 
 networks:
   api:
@@ -77,8 +77,3 @@ networks:
     driver: bridge
   payment-processor:
     external: true
-
-
-
-
-

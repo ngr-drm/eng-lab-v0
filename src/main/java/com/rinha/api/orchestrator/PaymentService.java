@@ -25,17 +25,32 @@ public class PaymentService {
                 requestedAt.toString()
         );
 
-        PaymentDTO.ProcessorType primary   = healthScheduler.isDefaultPreferred() ? PaymentDTO.ProcessorType.DEFAULT  : PaymentDTO.ProcessorType.FALLBACK;
-        PaymentDTO.ProcessorType secondary = primary == PaymentDTO.ProcessorType.DEFAULT      ? PaymentDTO.ProcessorType.FALLBACK : PaymentDTO.ProcessorType.DEFAULT;
+        PaymentDTO.ProcessorType primary   = healthScheduler.isDefaultPreferred()
+                ? PaymentDTO.ProcessorType.DEFAULT
+                : PaymentDTO.ProcessorType.FALLBACK;
+        PaymentDTO.ProcessorType secondary = primary == PaymentDTO.ProcessorType.DEFAULT
+                ? PaymentDTO.ProcessorType.FALLBACK
+                : PaymentDTO.ProcessorType.DEFAULT;
 
-        return processorClient.processPayment(primary, pReq)
-                .then(redisStore.savePayment(primary, req.correlationId(), req.amount(), requestedAt))
-                .onErrorResume(e -> {
-                    log.error("Failed to process payment with primary processor {} for correlationId {}, attempting secondary", primary, req.correlationId(), e);
-                    return processorClient.processPayment(secondary, pReq)
-                            .then(redisStore.savePayment(secondary, req.correlationId(), req.amount(), requestedAt))
-                            .doOnError(e2 -> log.error("Failed to process payment with secondary processor {} for correlationId {}", secondary, req.correlationId(), e2));
+        return tryProcess(primary, pReq, req, requestedAt)
+                .onErrorResume(ProcessorException.class, e -> {
+                    log.warn("Primary {} failed for {}, trying secondary", primary, req.correlationId());
+                    return tryProcess(secondary, pReq, req, requestedAt);
                 });
+    }
+
+    /**
+     * Calls processor first, then records in Redis atomically.
+     * Wraps processor errors in ProcessorException to distinguish from Redis errors.
+     */
+    private Mono<Void> tryProcess(PaymentDTO.ProcessorType type,
+                                   PaymentDTO.ProcessorPaymentRequest pReq,
+                                   PaymentDTO.PaymentRequest req,
+                                   Instant requestedAt) {
+        return processorClient.processPayment(type, pReq)
+                .onErrorMap(e -> !(e instanceof ProcessorException),
+                        e -> new ProcessorException(type, e))
+                .then(redisStore.savePayment(type, req.correlationId(), req.amount(), requestedAt));
     }
 
     public Mono<PaymentDTO.PaymentSummaryResponse> getPaymentsSummary(Instant from, Instant to) {
@@ -43,5 +58,17 @@ public class PaymentService {
                 redisStore.getSummary(PaymentDTO.ProcessorType.DEFAULT,  from, to),
                 redisStore.getSummary(PaymentDTO.ProcessorType.FALLBACK, from, to)
         ).map(t -> new PaymentDTO.PaymentSummaryResponse(t.getT1(), t.getT2()));
+    }
+
+    /**
+     * Marker exception to distinguish processor failures from Redis/other errors.
+     * Only processor errors trigger fallback to secondary processor.
+     */
+    public static class ProcessorException extends RuntimeException {
+        private final PaymentDTO.ProcessorType type;
+        public ProcessorException(PaymentDTO.ProcessorType type, Throwable cause) {
+            super("processor-failed-" + type, cause);
+            this.type = type;
+        }
     }
 }

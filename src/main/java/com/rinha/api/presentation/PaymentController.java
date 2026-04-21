@@ -2,6 +2,7 @@ package com.rinha.api.presentation;
 
 
 import com.rinha.api.orchestrator.PaymentDTO;
+import com.rinha.api.orchestrator.PaymentQueue;
 import com.rinha.api.orchestrator.PaymentService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +15,7 @@ import java.time.Instant;
 @RequiredArgsConstructor
 public class PaymentController {
     private final PaymentService paymentService;
+    private final PaymentQueue paymentQueue;
 
     @GetMapping("/health")
     public Mono<ResponseEntity<String>> healthCheck() {
@@ -21,10 +23,14 @@ public class PaymentController {
     }
 
     @PostMapping("/payments")
-    public Mono<ResponseEntity<Void>> processPayment(@RequestBody PaymentDTO.PaymentRequest req) {
-        return this.paymentService.processPayment(req)
-                .thenReturn(ResponseEntity.ok().<Void>build())
-                .onErrorReturn(ResponseEntity.status(503).<Void>build());
+    public ResponseEntity<Void> processPayment(@RequestBody PaymentDTO.PaymentRequest req) {
+        if (req == null || req.correlationId() == null || req.amount() == null) {
+            return ResponseEntity.badRequest().build();
+        }
+        boolean enqueued = paymentQueue.offer(req);
+        return enqueued
+                ? ResponseEntity.accepted().build()   // 202 — ~1ms
+                : ResponseEntity.status(503).build();  // queue full
     }
 
     @GetMapping("/payments-summary")
