@@ -10,138 +10,128 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * In-memory bounded queue with Virtual Thread consumers.
- * Flow:
- *   1. Controller.offer(req) → enqueue (~0ns) → 202
- *   2. N VThread workers drain queue continuously
- *   3. Each worker picks items (or batches) and calls PaymentService
- *   4. On shutdown: stop accepting, drain remaining items, then exit
+ * In-memory bounded queue with virtual-thread workers.
+ *  - Few workers (2) to limit concurrency on processors and avoid race/contention.
+ *  - On failure, item is re-enqueued with exponential backoff (1s, 2s, 4s, 8s, 15s cap),
+ *    up to MAX_ATTEMPTS, before being declared a permanent failure.
+ *  - Re-enqueue uses a scheduled executor; never blocks the worker on backoff.
  */
 @Component
 public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
-    private static final int QUEUE_CAPACITY = 10_000;
-    private static final int WORKER_COUNT = 8;
-    private static final int BATCH_SIZE = 16;
-    private static final long BATCH_WAIT_MS = 5; // max wait to fill batch
+    private static final int  QUEUE_CAPACITY = 20_000;
+    private static final int  WORKER_COUNT   = 2;
+    private static final int  MAX_ATTEMPTS   = 5;
+    private static final long BACKOFF_CAP_MS = 15_000;
 
     private final PaymentService paymentService;
-    private final BlockingQueue<QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+    private final BlockingQueue<PaymentDTO.QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final CountDownLatch shutdownLatch = new CountDownLatch(WORKER_COUNT);
     private final List<Thread> workers = new ArrayList<>();
+    private final ScheduledExecutorService backoffScheduler =
+            new ScheduledThreadPoolExecutor(1, r -> {
+                Thread t = new Thread(r, "payment-backoff");
+                t.setDaemon(true);
+                return t;
+            });
 
     public PaymentQueue(PaymentService paymentService) {
         this.paymentService = paymentService;
     }
 
-    record QueuedPayment(PaymentDTO.PaymentRequest request, Instant enqueuedAt) {}
-
     /**
-     * Non-blocking enqueue. Returns false if queue is full (triggers 503).
+     * Non-blocking enqueue. requestedAt is captured at admission time to anchor audit timeline.
+     * Returns false if queue is full (caller should respond 503).
      */
     public boolean offer(PaymentDTO.PaymentRequest req) {
         if (!running.get()) return false;
-        return queue.offer(new QueuedPayment(req, Instant.now()));
+        return queue.offer(new PaymentDTO.QueuedPayment(
+                req.correlationId(), req.amount(), Instant.now(), 0));
     }
 
-    public int size() {
-        return queue.size();
-    }
+    public int size() { return queue.size(); }
 
     @PostConstruct
     public void start() {
         for (int i = 0; i < WORKER_COUNT; i++) {
-            final int workerId = i;
+            final int id = i;
             Thread vt = Thread.ofVirtual()
-                    .name("payment-worker-" + workerId)
-                    .start(() -> workerLoop(workerId));
+                    .name("payment-worker-" + id)
+                    .start(() -> workerLoop(id));
             workers.add(vt);
         }
-        log.info("PaymentQueue started with {} VThread workers, capacity={}", WORKER_COUNT, QUEUE_CAPACITY);
+        log.info("PaymentQueue started workers={} capacity={}", WORKER_COUNT, QUEUE_CAPACITY);
     }
 
-    /**
-     * Graceful shutdown:
-     *   1. Stop accepting new items
-     *   2. Workers drain remaining items
-     *   3. Wait up to 30s for drain to complete
-     */
     @PreDestroy
     public void shutdown() {
-        log.info("PaymentQueue shutting down. Queue size: {}", queue.size());
+        log.info("PaymentQueue shutting down. queue={}", queue.size());
         running.set(false);
-
-        // Interrupt workers so they wake from poll()
-        workers.forEach(Thread::interrupt);
-
         try {
-            boolean drained = shutdownLatch.await(30, TimeUnit.SECONDS);
-            if (!drained) {
-                log.error("PaymentQueue drain timed out! {} items lost", queue.size());
-            } else {
-                log.info("PaymentQueue drained successfully");
+            // Wait for graceful drain (best effort).
+            if (!shutdownLatch.await(30, TimeUnit.SECONDS)) {
+                log.error("PaymentQueue drain timeout. lost~={}", queue.size());
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.error("PaymentQueue shutdown interrupted, {} items may be lost", queue.size());
+        } finally {
+            backoffScheduler.shutdownNow();
+            workers.forEach(Thread::interrupt);
         }
     }
 
-    private void workerLoop(int workerId) {
-        List<QueuedPayment> batch = new ArrayList<>(BATCH_SIZE);
+    private void workerLoop(int id) {
         try {
             while (running.get() || !queue.isEmpty()) {
-                batch.clear();
-
-                // Block-wait for first item
-                QueuedPayment first = queue.poll(100, TimeUnit.MILLISECONDS);
-                if (first == null) continue;
-                batch.add(first);
-
-                // Drain up to BATCH_SIZE - 1 more without blocking
-                queue.drainTo(batch, BATCH_SIZE - 1);
-
-                processBatch(batch, workerId);
-            }
-
-            // Final drain after running=false
-            batch.clear();
-            queue.drainTo(batch);
-            if (!batch.isEmpty()) {
-                log.info("Worker-{} draining {} remaining items", workerId, batch.size());
-                processBatch(batch, workerId);
-            }
-        } catch (InterruptedException e) {
-            // Shutdown signal — drain remaining
-            batch.clear();
-            queue.drainTo(batch);
-            if (!batch.isEmpty()) {
-                log.info("Worker-{} interrupted, draining {} items", workerId, batch.size());
-                processBatch(batch, workerId);
+                PaymentDTO.QueuedPayment item;
+                try {
+                    item = queue.poll(200, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    if (!running.get() && queue.isEmpty()) break;
+                    continue;
+                }
+                if (item == null) continue;
+                handle(item, id);
             }
         } finally {
             shutdownLatch.countDown();
         }
     }
 
-    private void processBatch(List<QueuedPayment> batch, int workerId) {
-        for (QueuedPayment qp : batch) {
-            try {
-                // Block the VThread (cheap!) until processing completes
-                paymentService.processPayment(qp.request()).block();
-            } catch (Exception e) {
-                log.error("Worker-{} failed to process correlationId={}: {}",
-                        workerId, qp.request().correlationId(), e.getMessage());
-            }
+    private void handle(PaymentDTO.QueuedPayment item, int workerId) {
+        try {
+            Boolean ok = paymentService.processPayment(item).block();
+            if (Boolean.TRUE.equals(ok)) return;
+            scheduleRetry(item, workerId);
+        } catch (Exception e) {
+            log.warn("worker-{} error cid={}: {}", workerId, item.correlationId(), e.toString());
+            scheduleRetry(item, workerId);
         }
     }
-}
 
+    private void scheduleRetry(PaymentDTO.QueuedPayment item, int workerId) {
+        int next = item.attempts() + 1;
+        if (next >= MAX_ATTEMPTS) {
+            log.error("PERMANENT FAILURE cid={} after {} attempts", item.correlationId(), next);
+            return;
+        }
+        long delay = Math.min(1000L * (1L << item.attempts()), BACKOFF_CAP_MS);
+        PaymentDTO.QueuedPayment retry = new PaymentDTO.QueuedPayment(
+                item.correlationId(), item.amount(), item.requestedAt(), next);
+        backoffScheduler.schedule(() -> {
+            if (!queue.offer(retry)) {
+                log.error("retry enqueue dropped cid={} (queue full)", retry.correlationId());
+            }
+        }, delay, TimeUnit.MILLISECONDS);
+    }
+}

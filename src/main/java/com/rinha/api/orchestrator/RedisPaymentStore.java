@@ -10,6 +10,14 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 
+/**
+ * Single ZSET ledger per processor (`payments:default:zset`, `payments:fallback:zset`).
+ * Score = epochMillis; member = "<cid>:<amount>".
+ * Idempotency key (`payments:idem:<cid>`) prevents double-counting under retries.
+ *
+ * Lua script ensures atomic idempotency-check + ZADD: either the entry is added once,
+ * or nothing happens — exactly-once accounting.
+ */
 @Component
 public class RedisPaymentStore {
 
@@ -20,85 +28,70 @@ public class RedisPaymentStore {
         this.redis = redis;
     }
 
-    // Lua script: atomic idempotency check + count/amount/timeline write
-    // KEYS[1]=idempotencyKey, KEYS[2]=countKey, KEYS[3]=amountKey, KEYS[4]=timelineKey
-    // ARGV[1]=amount (string), ARGV[2]=score (epochMillis), ARGV[3]=zsetValue, ARGV[4]=ttl seconds
-    // Returns: 1 if saved, 0 if duplicate
+    // KEYS[1]=idemKey, KEYS[2]=zsetKey
+    // ARGV[1]=score, ARGV[2]=member, ARGV[3]=ttlSec
     private static final String SAVE_LUA =
-            "if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end " +
-            "redis.call('SET', KEYS[1], '1', 'EX', ARGV[4]) " +
-            "redis.call('INCRBY', KEYS[2], 1) " +
-            "redis.call('INCRBYFLOAT', KEYS[3], ARGV[1]) " +
-            "redis.call('ZADD', KEYS[4], ARGV[2], ARGV[3]) " +
-            "return 1";
+            "if redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[3]) then " +
+            "  redis.call('ZADD', KEYS[2], ARGV[1], ARGV[2]) " +
+            "  return 1 " +
+            "end " +
+            "return 0";
 
     private static final RedisScript<Long> SAVE_SCRIPT = RedisScript.of(SAVE_LUA, Long.class);
 
-    private String key(PaymentDTO.ProcessorType type, String suffix) {
-        return "payments:" + type.name().toLowerCase() + ":" + suffix;
+    private static String zsetKey(PaymentDTO.ProcessorType type) {
+        return "payments:" + (type == PaymentDTO.ProcessorType.DEFAULT ? "default" : "fallback") + ":zset";
     }
 
-    /**
-     * Atomic save: idempotency check + count + amount + timeline in a single Lua script.
-     * Returns Mono.empty() on duplicate, Mono<Void> on success.
-     */
     public Mono<Void> savePayment(PaymentDTO.ProcessorType type, String correlationId,
                                   BigDecimal amount, Instant requestedAt) {
-        String idempotencyKey = "payments:idempotency:" + correlationId;
-        String countKey  = key(type, "count");
-        String amountKey = key(type, "amount");
-        String timeKey   = key(type, "timeline");
-        String value     = correlationId + ":" + amount.toPlainString();
-        String score     = String.valueOf(requestedAt.toEpochMilli());
-        String ttl       = "3600"; // 1 hour
+        String idem = "payments:idem:" + correlationId;
+        String zkey = zsetKey(type);
+        String member = correlationId + ":" + amount.toPlainString();
+        String score  = String.valueOf(requestedAt.toEpochMilli());
 
-        List<String> keys = List.of(idempotencyKey, countKey, amountKey, timeKey);
-        List<String> args = List.of(amount.toPlainString(), score, value, ttl);
-
-        return redis.execute(SAVE_SCRIPT, keys, args)
+        return redis.execute(SAVE_SCRIPT,
+                        List.of(idem, zkey),
+                        List.of(score, member, "3600"))
                 .next()
                 .then();
     }
 
     public Mono<PaymentDTO.SummaryEntry> getSummary(PaymentDTO.ProcessorType type, Instant from, Instant to) {
-        String countKey  = key(type, "count");
-        String amountKey = key(type, "amount");
-        String timeKey   = key(type, "timeline");
-
-        if (from == null && to == null) {
-            return redis.opsForValue().multiGet(List.of(countKey, amountKey))
-                    .map(values -> {
-                        long count = parseLong(values.get(0));
-                        BigDecimal total = parseBigDecimal(values.get(1));
-                        return new PaymentDTO.SummaryEntry(count, total);
-                    });
-        }
-
+        String zkey = zsetKey(type);
         double minScore = from != null ? from.toEpochMilli() : Double.NEGATIVE_INFINITY;
         double maxScore = to   != null ? to.toEpochMilli()   : Double.POSITIVE_INFINITY;
 
         return redis.opsForZSet()
-                .rangeByScore(timeKey, org.springframework.data.domain.Range.closed(minScore, maxScore))
-                .collectList()
-                .map(entries -> {
-                    long count = entries.size();
-                    BigDecimal total = entries.stream()
-                            .map(v -> {
-                                String[] parts = v.split(":", 2);
-                                return parts.length == 2 ? new BigDecimal(parts[1]) : BigDecimal.ZERO;
-                            })
-                            .reduce(BigDecimal.ZERO, BigDecimal::add);
-                    return new PaymentDTO.SummaryEntry(count, total);
-                });
+                .rangeByScore(zkey, org.springframework.data.domain.Range.closed(minScore, maxScore))
+                .reduce(new long[]{0L}, (acc, v) -> { acc[0]++; return acc; })
+                .zipWith(redis.opsForZSet()
+                        .rangeByScore(zkey, org.springframework.data.domain.Range.closed(minScore, maxScore))
+                        .map(this::extractAmount)
+                        .reduce(BigDecimal.ZERO, BigDecimal::add))
+                .map(t -> new PaymentDTO.SummaryEntry(t.getT1()[0], t.getT2()));
     }
 
-    private long parseLong(String v) {
-        if (v == null || v.isBlank()) return 0L;
-        try { return Long.parseLong(v); } catch (NumberFormatException e) { return 0L; }
+    private BigDecimal extractAmount(String member) {
+        int idx = member.lastIndexOf(':');
+        if (idx < 0) return BigDecimal.ZERO;
+        try { return new BigDecimal(member.substring(idx + 1)); }
+        catch (NumberFormatException e) { return BigDecimal.ZERO; }
     }
 
-    private BigDecimal parseBigDecimal(String v) {
-        if (v == null || v.isBlank()) return BigDecimal.ZERO;
-        try { return new BigDecimal(v); } catch (NumberFormatException e) { return BigDecimal.ZERO; }
+    /** Used by /purge-payments to reset state between official k6 runs. */
+    public Mono<Void> purge() {
+        return redis.delete(
+                zsetKey(PaymentDTO.ProcessorType.DEFAULT),
+                zsetKey(PaymentDTO.ProcessorType.FALLBACK)
+        ).then(redis.execute(connection ->
+                connection.keyCommands()
+                        .keys(java.nio.ByteBuffer.wrap("payments:idem:*".getBytes()))
+                        .flatMapMany(reactor.core.publisher.Flux::fromIterable)
+                        .collectList()
+                        .flatMap(keys -> keys.isEmpty()
+                                ? Mono.just(0L)
+                                : connection.keyCommands().mDel(keys))
+        ).then());
     }
 }

@@ -3,6 +3,7 @@ package com.rinha.api.orchestrator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 
 public class PaymentDTO {
     public enum ProcessorType {
@@ -33,5 +34,16 @@ public class PaymentDTO {
     public record PaymentSummaryResponse(
             @JsonProperty("default") SummaryEntry defaultProcessor,
             SummaryEntry fallback
+    ) {}
+
+    /** Routing decision shared via Redis (TTL 5s). */
+    public record RouteDecision(ProcessorType processor, long ts) {}
+
+    /** Queue item carrying retry attempts and the original requestedAt. */
+    public record QueuedPayment(
+            String correlationId,
+            BigDecimal amount,
+            Instant requestedAt,
+            int attempts
     ) {}
 }

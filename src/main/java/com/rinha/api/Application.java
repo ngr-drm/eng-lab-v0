@@ -27,14 +27,16 @@ public class Application {
 	@Bean
 	public WebClient.Builder webClientBuilder() {
 		ConnectionProvider provider = ConnectionProvider.builder("custom")
-				.maxConnections(64)
+				.maxConnections(32)
 				.maxIdleTime(Duration.ofSeconds(20))
-				.pendingAcquireMaxCount(256)
+				.pendingAcquireMaxCount(512)
+				.pendingAcquireTimeout(Duration.ofSeconds(11))
 				.build();
 
 		HttpClient httpClient = HttpClient.create(provider)
 				.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 2000)
-				.responseTimeout(Duration.ofSeconds(2));
+				.option(ChannelOption.TCP_NODELAY, true)
+				.responseTimeout(Duration.ofSeconds(11));
 		return WebClient.builder()
 				.clientConnector(new ReactorClientHttpConnector(httpClient));
 	}

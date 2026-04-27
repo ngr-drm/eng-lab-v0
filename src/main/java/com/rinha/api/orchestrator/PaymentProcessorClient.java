@@ -26,16 +26,26 @@ public class PaymentProcessorClient {
         return type == PaymentDTO.ProcessorType.DEFAULT ? defaultClient : fallbackClient;
     }
 
-    public Mono<Void> processPayment(PaymentDTO.ProcessorType type, PaymentDTO.ProcessorPaymentRequest req) {
+    /**
+     * Sends payment to the chosen processor.
+     * Timeout aligned with reference winner (10s) — avoids client-side aborts on slow but successful calls,
+     * which is the root cause of "caixa dois" (double-charge across processors).
+     * Returns Mono<Boolean> — true on HTTP 2xx, false otherwise. Never throws on 5xx.
+     */
+    public Mono<Boolean> processPayment(PaymentDTO.ProcessorType type, PaymentDTO.ProcessorPaymentRequest req) {
         return clientFor(type)
                 .post()
                 .uri("/payments")
                 .bodyValue(req)
                 .retrieve()
-                .onStatus(HttpStatusCode::is5xxServerError,
-                        resp -> Mono.error(new RuntimeException("processor-error-" + type)))
+                .onStatus(HttpStatusCode::isError,
+                        resp -> resp.bodyToMono(String.class)
+                                .defaultIfEmpty("")
+                                .flatMap(b -> Mono.error(new ProcessorFailure())))
                 .bodyToMono(Void.class)
-                .timeout(Duration.ofSeconds(2));
+                .timeout(Duration.ofSeconds(10))
+                .thenReturn(Boolean.TRUE)
+                .onErrorReturn(Boolean.FALSE);
     }
 
     public Mono<PaymentDTO.ServiceHealth> checkHealth(PaymentDTO.ProcessorType type) {
@@ -46,7 +56,7 @@ public class PaymentProcessorClient {
                 .onStatus(status -> status.value() == 429,
                         resp -> Mono.error(new RateLimitException()))
                 .bodyToMono(PaymentDTO.ServiceHealth.class)
-                .timeout(Duration.ofSeconds(3))
+                .timeout(Duration.ofSeconds(1))
                 .onErrorResume(e -> {
                     if (e instanceof RateLimitException) return Mono.error(e);
                     return Mono.just(new PaymentDTO.ServiceHealth(true, 9999));
@@ -55,5 +65,10 @@ public class PaymentProcessorClient {
 
     public static class RateLimitException extends RuntimeException {
         public RateLimitException() { super("rate-limited"); }
+    }
+
+    public static class ProcessorFailure extends RuntimeException {
+        public ProcessorFailure() { super("processor-failure"); }
+        @Override public synchronized Throwable fillInStackTrace() { return this; }
     }
 }

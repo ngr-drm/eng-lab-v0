@@ -17,40 +17,41 @@ public class PaymentService {
     private final RedisPaymentStore redisStore;
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
 
-    public Mono<Void> processPayment(PaymentDTO.PaymentRequest req) {
-        Instant requestedAt = Instant.now();
+    /**
+     * Sends to the gateway chosen by the shared health route.
+     * No per-call cross-processor failover (that would cause "caixa dois" on timeout).
+     * On failure, the worker re-enqueues the item with backoff and retries on the
+     * route that is current at retry time (which may have shifted to FALLBACK).
+     *
+     * @return Mono<Boolean> — true if the processor accepted (200) AND ledger write succeeded.
+     */
+    public Mono<Boolean> processPayment(PaymentDTO.QueuedPayment item) {
+        Instant requestedAt = item.requestedAt();
+        PaymentDTO.ProcessorType target = healthScheduler.currentRoute();
+
         PaymentDTO.ProcessorPaymentRequest pReq = new PaymentDTO.ProcessorPaymentRequest(
-                req.correlationId(),
-                req.amount(),
+                item.correlationId(),
+                item.amount(),
                 requestedAt.toString()
         );
 
-        PaymentDTO.ProcessorType primary   = healthScheduler.isDefaultPreferred()
-                ? PaymentDTO.ProcessorType.DEFAULT
-                : PaymentDTO.ProcessorType.FALLBACK;
-        PaymentDTO.ProcessorType secondary = primary == PaymentDTO.ProcessorType.DEFAULT
-                ? PaymentDTO.ProcessorType.FALLBACK
-                : PaymentDTO.ProcessorType.DEFAULT;
-
-        return tryProcess(primary, pReq, req, requestedAt)
-                .onErrorResume(ProcessorException.class, e -> {
-                    log.warn("Primary {} failed for {}, trying secondary", primary, req.correlationId());
-                    return tryProcess(secondary, pReq, req, requestedAt);
+        return processorClient.processPayment(target, pReq)
+                .flatMap(ok -> {
+                    if (!Boolean.TRUE.equals(ok)) {
+                        return Mono.just(Boolean.FALSE);
+                    }
+                    return redisStore.savePayment(target, item.correlationId(), item.amount(), requestedAt)
+                            .thenReturn(Boolean.TRUE)
+                            .onErrorResume(e -> {
+                                // Processor accepted but ledger write failed → critical inconsistency window.
+                                // Retry the save (idempotent via Lua script) — never re-call the processor.
+                                log.error("ledger save failed cid={} target={} err={}",
+                                        item.correlationId(), target, e.toString());
+                                return redisStore.savePayment(target, item.correlationId(), item.amount(), requestedAt)
+                                        .thenReturn(Boolean.TRUE)
+                                        .onErrorReturn(Boolean.FALSE);
+                            });
                 });
-    }
-
-    /**
-     * Calls processor first, then records in Redis atomically.
-     * Wraps processor errors in ProcessorException to distinguish from Redis errors.
-     */
-    private Mono<Void> tryProcess(PaymentDTO.ProcessorType type,
-                                   PaymentDTO.ProcessorPaymentRequest pReq,
-                                   PaymentDTO.PaymentRequest req,
-                                   Instant requestedAt) {
-        return processorClient.processPayment(type, pReq)
-                .onErrorMap(e -> !(e instanceof ProcessorException),
-                        e -> new ProcessorException(type, e))
-                .then(redisStore.savePayment(type, req.correlationId(), req.amount(), requestedAt));
     }
 
     public Mono<PaymentDTO.PaymentSummaryResponse> getPaymentsSummary(Instant from, Instant to) {
@@ -58,17 +59,5 @@ public class PaymentService {
                 redisStore.getSummary(PaymentDTO.ProcessorType.DEFAULT,  from, to),
                 redisStore.getSummary(PaymentDTO.ProcessorType.FALLBACK, from, to)
         ).map(t -> new PaymentDTO.PaymentSummaryResponse(t.getT1(), t.getT2()));
-    }
-
-    /**
-     * Marker exception to distinguish processor failures from Redis/other errors.
-     * Only processor errors trigger fallback to secondary processor.
-     */
-    public static class ProcessorException extends RuntimeException {
-        private final PaymentDTO.ProcessorType type;
-        public ProcessorException(PaymentDTO.ProcessorType type, Throwable cause) {
-            super("processor-failed-" + type, cause);
-            this.type = type;
-        }
     }
 }
