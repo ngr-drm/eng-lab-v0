@@ -64,12 +64,12 @@ public class RedisPaymentStore {
 
         return redis.opsForZSet()
                 .rangeByScore(zkey, org.springframework.data.domain.Range.closed(minScore, maxScore))
-                .reduce(new long[]{0L}, (acc, v) -> { acc[0]++; return acc; })
-                .zipWith(redis.opsForZSet()
-                        .rangeByScore(zkey, org.springframework.data.domain.Range.closed(minScore, maxScore))
-                        .map(this::extractAmount)
-                        .reduce(BigDecimal.ZERO, BigDecimal::add))
-                .map(t -> new PaymentDTO.SummaryEntry(t.getT1()[0], t.getT2()));
+                .reduce(new Object[]{0L, BigDecimal.ZERO}, (acc, v) -> {
+                    acc[0] = ((Long) acc[0]) + 1L;
+                    acc[1] = ((BigDecimal) acc[1]).add(extractAmount(v));
+                    return acc;
+                })
+                .map(acc -> new PaymentDTO.SummaryEntry((Long) acc[0], (BigDecimal) acc[1]));
     }
 
     private BigDecimal extractAmount(String member) {
@@ -84,14 +84,6 @@ public class RedisPaymentStore {
         return redis.delete(
                 zsetKey(PaymentDTO.ProcessorType.DEFAULT),
                 zsetKey(PaymentDTO.ProcessorType.FALLBACK)
-        ).then(redis.execute(connection ->
-                connection.keyCommands()
-                        .keys(java.nio.ByteBuffer.wrap("payments:idem:*".getBytes()))
-                        .flatMapMany(reactor.core.publisher.Flux::fromIterable)
-                        .collectList()
-                        .flatMap(keys -> keys.isEmpty()
-                                ? Mono.just(0L)
-                                : connection.keyCommands().mDel(keys))
-        ).then());
+        ).then();
     }
 }
