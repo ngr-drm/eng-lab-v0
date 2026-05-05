@@ -79,11 +79,24 @@ public class RedisPaymentStore {
         catch (NumberFormatException e) { return BigDecimal.ZERO; }
     }
 
+    // Lua: SCAN + DEL all payments:idem:* keys in batches (non-blocking vs KEYS)
+    private static final String PURGE_IDEM_LUA =
+            "local cursor = '0' " +
+            "repeat " +
+            "  local result = redis.call('SCAN', cursor, 'MATCH', 'payments:idem:*', 'COUNT', 500) " +
+            "  cursor = result[1] " +
+            "  if #result[2] > 0 then redis.call('DEL', unpack(result[2])) end " +
+            "until cursor == '0' " +
+            "return 1";
+
+    private static final RedisScript<Long> PURGE_IDEM_SCRIPT = RedisScript.of(PURGE_IDEM_LUA, Long.class);
+
     /** Used by /purge-payments to reset state between official k6 runs. */
     public Mono<Void> purge() {
         return redis.delete(
                 zsetKey(PaymentDTO.ProcessorType.DEFAULT),
                 zsetKey(PaymentDTO.ProcessorType.FALLBACK)
-        ).then();
+        )
+        .then(redis.execute(PURGE_IDEM_SCRIPT, List.of(), List.of()).then());
     }
 }
