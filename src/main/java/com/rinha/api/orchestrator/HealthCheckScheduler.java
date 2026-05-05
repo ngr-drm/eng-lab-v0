@@ -36,7 +36,7 @@ public class HealthCheckScheduler {
     private static final String ROUTE_KEY  = "health:route"; // value: "DEFAULT" or "FALLBACK"
     private static final Duration LEADER_TTL = Duration.ofSeconds(6);
     private static final Duration ROUTE_TTL  = Duration.ofSeconds(6);
-    private static final long LOCAL_CACHE_TTL_MS = 1000;
+    private static final long LOCAL_CACHE_TTL_MS = 5000;
 
     private final String instanceId = UUID.randomUUID().toString();
 
@@ -91,7 +91,7 @@ public class HealthCheckScheduler {
 
     /**
      * Hot path: returns the current routing target.
-     * Local 1s cache; on miss reads Redis (non-blocking via cache.get only — block-safe on virtual thread).
+     * Local 5s cache; on miss reads Redis (non-blocking via cache.get only — block-safe on virtual thread).
      */
     public PaymentDTO.ProcessorType currentRoute() {
         CachedRoute c = localRoute.get();

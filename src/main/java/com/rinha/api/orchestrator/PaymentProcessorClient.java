@@ -56,7 +56,7 @@ public class PaymentProcessorClient {
                 .onStatus(status -> status.value() == 429,
                         resp -> Mono.error(new RateLimitException()))
                 .bodyToMono(PaymentDTO.ServiceHealth.class)
-                .timeout(Duration.ofSeconds(1))
+                .timeout(Duration.ofSeconds(10))
                 .onErrorResume(e -> {
                     if (e instanceof RateLimitException) return Mono.error(e);
                     return Mono.just(new PaymentDTO.ServiceHealth(true, 9999));
