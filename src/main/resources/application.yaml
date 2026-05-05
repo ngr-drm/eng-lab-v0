@@ -36,4 +36,4 @@ payment:
 logging:
   level:
     root: WARN
-    com.rinha: WARN
+    com.rinha: INFO

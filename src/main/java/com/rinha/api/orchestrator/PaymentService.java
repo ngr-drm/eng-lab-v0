@@ -29,6 +29,9 @@ public class PaymentService {
         Instant requestedAt = item.requestedAt();
         PaymentDTO.ProcessorType target = healthScheduler.currentRoute();
 
+        log.info("[AUDIT] PROCESSING cid={} target={} requestedAt={} attempt={}",
+                item.correlationId(), target, requestedAt, item.attempts());
+
         PaymentDTO.ProcessorPaymentRequest pReq = new PaymentDTO.ProcessorPaymentRequest(
                 item.correlationId(),
                 item.amount(),
@@ -38,18 +41,28 @@ public class PaymentService {
         return processorClient.processPayment(target, pReq)
                 .flatMap(ok -> {
                     if (!Boolean.TRUE.equals(ok)) {
+                        log.warn("[AUDIT] PROCESSOR_REJECTED cid={} target={}", item.correlationId(), target);
                         return Mono.just(Boolean.FALSE);
                     }
+                    long scoreMs = requestedAt.toEpochMilli();
+                    log.info("[AUDIT] LEDGER_SAVING cid={} target={} scoreMsUsed={}",
+                            item.correlationId(), target, scoreMs);
                     return redisStore.savePayment(target, item.correlationId(), item.amount(), requestedAt)
+                            .doOnSuccess(v -> log.info("[AUDIT] LEDGER_SAVED cid={} target={}",
+                                    item.correlationId(), target))
                             .thenReturn(Boolean.TRUE)
                             .onErrorResume(e -> {
-                                // Processor accepted but ledger write failed → critical inconsistency window.
-                                // Retry the save (idempotent via Lua script) — never re-call the processor.
-                                log.error("ledger save failed cid={} target={} err={}",
+                                log.error("[AUDIT] LEDGER_FAIL cid={} target={} err={}",
                                         item.correlationId(), target, e.toString());
                                 return redisStore.savePayment(target, item.correlationId(), item.amount(), requestedAt)
+                                        .doOnSuccess(v -> log.info("[AUDIT] LEDGER_RETRY_SAVED cid={} target={}",
+                                                item.correlationId(), target))
                                         .thenReturn(Boolean.TRUE)
-                                        .onErrorReturn(Boolean.FALSE);
+                                        .onErrorResume(e2 -> {
+                                            log.error("[AUDIT] LEDGER_RETRY_FAIL cid={} target={} err={}",
+                                                    item.correlationId(), target, e2.toString());
+                                            return Mono.just(Boolean.FALSE);
+                                        });
                             });
                 });
     }
