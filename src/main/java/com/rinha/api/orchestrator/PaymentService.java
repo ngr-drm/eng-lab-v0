@@ -18,19 +18,20 @@ public class PaymentService {
     private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
 
     /**
-     * Sends to the gateway chosen by the shared health route.
-     * No per-call cross-processor failover (that would cause "caixa dois" on timeout).
-     * On failure, the worker re-enqueues the item with backoff and retries on the
-     * route that is current at retry time (which may have shifted to FALLBACK).
+     * Aligned with reference winner:
+     *  1. Send to processor on the current route.
+     *  2. On confirmed acceptance (200 or 422), save to ledger ONCE.
+     *  3. Otherwise, return false so the worker reschedules with backoff.
+
+     * Idempotency is guaranteed by:
+     *  - Processor side: 422 on duplicate cid (treated here as TRUE).
+     *  - Ledger side: ZSET member = "<cid>:<amount>" — re-save is a no-op.
      *
-     * @return Mono<Boolean> — true if the processor accepted (200) AND ledger write succeeded.
+     * @return Mono<Boolean> — true iff the payment is accounted for end-to-end.
      */
     public Mono<Boolean> processPayment(PaymentDTO.QueuedPayment item) {
         Instant requestedAt = item.requestedAt();
         PaymentDTO.ProcessorType target = healthScheduler.currentRoute();
-
-        log.info("[AUDIT] PROCESSING cid={} target={} requestedAt={} attempt={}",
-                item.correlationId(), target, requestedAt, item.attempts());
 
         PaymentDTO.ProcessorPaymentRequest pReq = new PaymentDTO.ProcessorPaymentRequest(
                 item.correlationId(),
@@ -39,30 +40,18 @@ public class PaymentService {
         );
 
         return processorClient.processPayment(target, pReq)
-                .flatMap(ok -> {
-                    if (!Boolean.TRUE.equals(ok)) {
-                        log.warn("[AUDIT] PROCESSOR_REJECTED cid={} target={}", item.correlationId(), target);
+                .flatMap(accepted -> {
+                    if (!accepted) {
                         return Mono.just(Boolean.FALSE);
                     }
-                    long scoreMs = requestedAt.toEpochMilli();
-                    log.info("[AUDIT] LEDGER_SAVING cid={} target={} scoreMsUsed={}",
-                            item.correlationId(), target, scoreMs);
                     return redisStore.savePayment(target, item.correlationId(), item.amount(), requestedAt)
-                            .doOnSuccess(v -> log.info("[AUDIT] LEDGER_SAVED cid={} target={}",
-                                    item.correlationId(), target))
                             .thenReturn(Boolean.TRUE)
                             .onErrorResume(e -> {
                                 log.error("[AUDIT] LEDGER_FAIL cid={} target={} err={}",
                                         item.correlationId(), target, e.toString());
-                                return redisStore.savePayment(target, item.correlationId(), item.amount(), requestedAt)
-                                        .doOnSuccess(v -> log.info("[AUDIT] LEDGER_RETRY_SAVED cid={} target={}",
-                                                item.correlationId(), target))
-                                        .thenReturn(Boolean.TRUE)
-                                        .onErrorResume(e2 -> {
-                                            log.error("[AUDIT] LEDGER_RETRY_FAIL cid={} target={} err={}",
-                                                    item.correlationId(), target, e2.toString());
-                                            return Mono.just(Boolean.FALSE);
-                                        });
+                                // Processor already accepted; force retry to commit ledger
+                                // (ZADD is idempotent by member, so a second save is safe).
+                                return Mono.just(Boolean.FALSE);
                             });
                 });
     }

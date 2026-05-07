@@ -34,7 +34,6 @@ public class PaymentQueue {
     private static final long BACKOFF_CAP_MS = 15_000;
 
     private final PaymentService paymentService;
-    private final HealthCheckScheduler healthScheduler;
     private final BlockingQueue<PaymentDTO.QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final CountDownLatch shutdownLatch = new CountDownLatch(WORKER_COUNT);
@@ -46,9 +45,8 @@ public class PaymentQueue {
                 return t;
             });
 
-    public PaymentQueue(PaymentService paymentService, HealthCheckScheduler healthScheduler) {
+    public PaymentQueue(PaymentService paymentService) {
         this.paymentService = paymentService;
-        this.healthScheduler = healthScheduler;
     }
 
     /**
@@ -111,7 +109,6 @@ public class PaymentQueue {
     }
 
     private void handle(PaymentDTO.QueuedPayment item, int workerId) {
-        log.info("[AUDIT] DEQUEUED cid={} attempt={} queueSize={}", item.correlationId(), item.attempts(), queue.size());
         try {
             Boolean ok = paymentService.processPayment(item).block();
             if (Boolean.TRUE.equals(ok)) return;
@@ -125,18 +122,16 @@ public class PaymentQueue {
     private void scheduleRetry(PaymentDTO.QueuedPayment item, int workerId) {
         int next = item.attempts() + 1;
         if (next >= MAX_ATTEMPTS) {
-            log.error("[AUDIT] PERMANENT_FAILURE cid={} after {} attempts", item.correlationId(), next);
+            log.error("[AUDIT] PERMANENT_FAILURE cid={} attempts={}", item.correlationId(), next);
             return;
         }
         long delay = Math.min(1000L * (1L << item.attempts()), BACKOFF_CAP_MS);
-        PaymentDTO.ProcessorType currentRoute = healthScheduler.currentRoute();
-        log.info("[AUDIT] RETRY_SCHEDULED cid={} attempt={} nextAttempt={} delay={}ms currentRoute={}",
-                item.correlationId(), item.attempts(), next, delay, currentRoute);
         PaymentDTO.QueuedPayment retry = new PaymentDTO.QueuedPayment(
                 item.correlationId(), item.amount(), item.requestedAt(), next);
         backoffScheduler.schedule(() -> {
             if (!queue.offer(retry)) {
-                log.error("[AUDIT] RETRY_DROPPED cid={} (queue full)", retry.correlationId());
+                log.error("[AUDIT] RETRY_DROPPED cid={} attempt={} (queue full)",
+                        retry.correlationId(), next);
             }
         }, delay, TimeUnit.MILLISECONDS);
     }

@@ -2,21 +2,20 @@ package com.rinha.api.orchestrator;
 
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.ReactiveRedisTemplate;
-import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.List;
 
 /**
  * Single ZSET ledger per processor (`payments:default:zset`, `payments:fallback:zset`).
- * Score = epochMillis; member = "<cid>:<amount>".
- * Idempotency key (`payments:idem:<cid>`) prevents double-counting under retries.
- *
- * Lua script ensures atomic idempotency-check + ZADD: either the entry is added once,
- * or nothing happens — exactly-once accounting.
+ * Score  = epochMillis
+ * Member = "<cid>:<amount>"  -> naturally idempotent: same cid+amount overwrites the same entry.
+
+ * No local idempotency key: the payment-processor itself is idempotent (returns 422 on duplicate),
+ * and the ZSET dedups by member, so a retried save is a no-op for accounting.
+ * Aligned with the reference winning solution.
  */
 @Component
 public class RedisPaymentStore {
@@ -28,33 +27,16 @@ public class RedisPaymentStore {
         this.redis = redis;
     }
 
-    // KEYS[1]=idemKey, KEYS[2]=zsetKey
-    // ARGV[1]=score, ARGV[2]=member, ARGV[3]=ttlSec
-    private static final String SAVE_LUA =
-            "if redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[3]) then " +
-            "  redis.call('ZADD', KEYS[2], ARGV[1], ARGV[2]) " +
-            "  return 1 " +
-            "end " +
-            "return 0";
-
-    private static final RedisScript<Long> SAVE_SCRIPT = RedisScript.of(SAVE_LUA, Long.class);
-
     private static String zsetKey(PaymentDTO.ProcessorType type) {
         return "payments:" + (type == PaymentDTO.ProcessorType.DEFAULT ? "default" : "fallback") + ":zset";
     }
 
     public Mono<Void> savePayment(PaymentDTO.ProcessorType type, String correlationId,
                                   BigDecimal amount, Instant requestedAt) {
-        String idem = "payments:idem:" + correlationId;
         String zkey = zsetKey(type);
         String member = correlationId + ":" + amount.toPlainString();
-        String score  = String.valueOf(requestedAt.toEpochMilli());
-
-        return redis.execute(SAVE_SCRIPT,
-                        List.of(idem, zkey),
-                        List.of(score, member, "3600"))
-                .next()
-                .then();
+        double score = requestedAt.toEpochMilli();
+        return redis.opsForZSet().add(zkey, member, score).then();
     }
 
     public Mono<PaymentDTO.SummaryEntry> getSummary(PaymentDTO.ProcessorType type, Instant from, Instant to) {
@@ -79,24 +61,11 @@ public class RedisPaymentStore {
         catch (NumberFormatException e) { return BigDecimal.ZERO; }
     }
 
-    // Lua: SCAN + DEL all payments:idem:* keys in batches (non-blocking vs KEYS)
-    private static final String PURGE_IDEM_LUA =
-            "local cursor = '0' " +
-            "repeat " +
-            "  local result = redis.call('SCAN', cursor, 'MATCH', 'payments:idem:*', 'COUNT', 500) " +
-            "  cursor = result[1] " +
-            "  if #result[2] > 0 then redis.call('DEL', unpack(result[2])) end " +
-            "until cursor == '0' " +
-            "return 1";
-
-    private static final RedisScript<Long> PURGE_IDEM_SCRIPT = RedisScript.of(PURGE_IDEM_LUA, Long.class);
-
     /** Used by /purge-payments to reset state between official k6 runs. */
     public Mono<Void> purge() {
         return redis.delete(
                 zsetKey(PaymentDTO.ProcessorType.DEFAULT),
                 zsetKey(PaymentDTO.ProcessorType.FALLBACK)
-        )
-        .then(redis.execute(PURGE_IDEM_SCRIPT, List.of(), List.of()).then());
+        ).then();
     }
 }
