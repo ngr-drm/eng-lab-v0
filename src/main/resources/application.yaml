@@ -34,6 +34,8 @@ payment:
       url: ${PROCESSOR_FALLBACK_URL:http://localhost:8002}
 
 logging:
+  file:
+    name: audit.log
   level:
     root: WARN
     com.rinha: INFO
