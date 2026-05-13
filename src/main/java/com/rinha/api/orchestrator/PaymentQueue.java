@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
-    private static final int  QUEUE_CAPACITY = 20_000;
+    private static final int  QUEUE_CAPACITY = 50_000;
     private static final int  WORKER_COUNT   = 2;
     private static final int  MAX_ATTEMPTS   = 5;
     private static final long BACKOFF_CAP_MS = 15_000;
