@@ -1,29 +1,29 @@
 package com.rinha.api.orchestrator;
 
-import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.Set;
 
 /**
  * Single ZSET ledger per processor (`payments:default:zset`, `payments:fallback:zset`).
  * Score  = epochMillis
- * Member = "<cid>:<amount>"  -> naturally idempotent: same cid+amount overwrites the same entry.
-
- * No local idempotency key: the payment-processor itself is idempotent (returns 422 on duplicate),
- * and the ZSET dedups by member, so a retried save is a no-op for accounting.
- * Aligned with the reference winning solution.
+ * Member = "<cid>:<amount>"  -> naturally idempotent.
+ *
+ * Distributed idempotency via SETNX lock:idem:{cid} (TTL 30s) — prevents two instances
+ * from sending the same payment to the processor concurrently.
  */
 @Component
 public class RedisPaymentStore {
 
-    private final ReactiveRedisTemplate<String, String> redis;
+    private static final Duration IDEM_LOCK_TTL = Duration.ofSeconds(30);
 
-    public RedisPaymentStore(
-            @Qualifier("reactiveStringRedisTemplate") ReactiveRedisTemplate<String, String> redis) {
+    private final StringRedisTemplate redis;
+
+    public RedisPaymentStore(StringRedisTemplate redis) {
         this.redis = redis;
     }
 
@@ -31,27 +31,41 @@ public class RedisPaymentStore {
         return "payments:" + (type == PaymentDTO.ProcessorType.DEFAULT ? "default" : "fallback") + ":zset";
     }
 
-    public Mono<Void> savePayment(PaymentDTO.ProcessorType type, String correlationId,
-                                  BigDecimal amount, Instant requestedAt) {
+    /**
+     * Try to acquire processing lock for cid. Returns true if acquired (first to process).
+     * Returns false if another worker is already handling this cid.
+     */
+    public boolean tryAcquire(String correlationId) {
+        Boolean acquired = redis.opsForValue()
+                .setIfAbsent("lock:idem:" + correlationId, "1", IDEM_LOCK_TTL);
+        return Boolean.TRUE.equals(acquired);
+    }
+
+    public void savePayment(PaymentDTO.ProcessorType type, String correlationId,
+                            BigDecimal amount, Instant requestedAt) {
         String zkey = zsetKey(type);
         String member = correlationId + ":" + amount.toPlainString();
         double score = requestedAt.toEpochMilli();
-        return redis.opsForZSet().add(zkey, member, score).then();
+        redis.opsForZSet().add(zkey, member, score);
     }
 
-    public Mono<PaymentDTO.SummaryEntry> getSummary(PaymentDTO.ProcessorType type, Instant from, Instant to) {
+    public PaymentDTO.SummaryEntry getSummary(PaymentDTO.ProcessorType type, Instant from, Instant to) {
         String zkey = zsetKey(type);
         double minScore = from != null ? from.toEpochMilli() : Double.NEGATIVE_INFINITY;
         double maxScore = to   != null ? to.toEpochMilli()   : Double.POSITIVE_INFINITY;
 
-        return redis.opsForZSet()
-                .rangeByScore(zkey, org.springframework.data.domain.Range.closed(minScore, maxScore))
-                .reduce(new Object[]{0L, BigDecimal.ZERO}, (acc, v) -> {
-                    acc[0] = ((Long) acc[0]) + 1L;
-                    acc[1] = ((BigDecimal) acc[1]).add(extractAmount(v));
-                    return acc;
-                })
-                .map(acc -> new PaymentDTO.SummaryEntry((Long) acc[0], (BigDecimal) acc[1]));
+        Set<String> members = redis.opsForZSet()
+                .rangeByScore(zkey, minScore, maxScore);
+
+        long count = 0;
+        BigDecimal total = BigDecimal.ZERO;
+        if (members != null) {
+            for (String m : members) {
+                count++;
+                total = total.add(extractAmount(m));
+            }
+        }
+        return new PaymentDTO.SummaryEntry(count, total);
     }
 
     private BigDecimal extractAmount(String member) {
@@ -62,10 +76,10 @@ public class RedisPaymentStore {
     }
 
     /** Used by /purge-payments to reset state between official k6 runs. */
-    public Mono<Void> purge() {
-        return redis.delete(
+    public void purge() {
+        redis.delete(java.util.List.of(
                 zsetKey(PaymentDTO.ProcessorType.DEFAULT),
                 zsetKey(PaymentDTO.ProcessorType.FALLBACK)
-        ).then();
+        ));
     }
 }

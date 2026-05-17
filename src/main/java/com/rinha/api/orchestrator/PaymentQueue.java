@@ -110,8 +110,8 @@ public class PaymentQueue {
 
     private void handle(PaymentDTO.QueuedPayment item, int workerId) {
         try {
-            Boolean ok = paymentService.processPayment(item).block();
-            if (Boolean.TRUE.equals(ok)) return;
+            boolean ok = paymentService.processPayment(item);
+            if (ok) return;
             scheduleRetry(item, workerId);
         } catch (Exception e) {
             log.warn("[AUDIT] WORKER_ERROR worker-{} cid={}: {}", workerId, item.correlationId(), e.toString());

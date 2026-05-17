@@ -8,7 +8,6 @@ import com.rinha.api.orchestrator.RedisPaymentStore;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
 
 import java.time.Instant;
 import java.util.Map;
@@ -37,20 +36,19 @@ public class PaymentController {
     }
 
     @GetMapping("/payments-summary")
-    public Mono<ResponseEntity<PaymentDTO.PaymentSummaryResponse>> getSummary(
+    public ResponseEntity<PaymentDTO.PaymentSummaryResponse> getSummary(
             @RequestParam(required = false) String from,
             @RequestParam(required = false) String to) {
 
         Instant fromInstant = from != null ? Instant.parse(from) : null;
         Instant toInstant   = to   != null ? Instant.parse(to)   : null;
 
-        return paymentService.getPaymentsSummary(fromInstant, toInstant)
-                .map(ResponseEntity::ok);
+        return ResponseEntity.ok(paymentService.getPaymentsSummary(fromInstant, toInstant));
     }
 
     @PostMapping("/purge-payments")
-    public Mono<ResponseEntity<Map<String, String>>> purge() {
-        return redisStore.purge()
-                .thenReturn(ResponseEntity.ok(Map.of("status", "ok")));
+    public ResponseEntity<Map<String, String>> purge() {
+        redisStore.purge();
+        return ResponseEntity.ok(Map.of("status", "ok"));
     }
 }
