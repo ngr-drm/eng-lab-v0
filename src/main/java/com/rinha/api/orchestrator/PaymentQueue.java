@@ -12,38 +12,29 @@ import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * In-memory bounded queue with virtual-thread workers.
- *  - Few workers (2) to limit concurrency on processors and avoid race/contention.
- *  - On failure, item is re-enqueued with exponential backoff (1s, 2s, 4s, 8s, 15s cap),
- *    up to MAX_ATTEMPTS, before being declared a permanent failure.
- *  - Re-enqueue uses a scheduled executor; never blocks the worker on backoff.
+ * In-memory bounded queue with 30 virtual-thread workers.
+ *  - On failure, retries inline with Thread.sleep() (cheap on VTs).
+ *  - Max 2 attempts, backoff 10s then 20s — conservative to avoid saturating the processor.
+ *  - VTs block naturally on queue.poll() and HTTP calls without consuming OS threads.
  */
 @Component
 public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
-    private static final int  QUEUE_CAPACITY = 50_000;
-    private static final int  WORKER_COUNT   = 2;
-    private static final int  MAX_ATTEMPTS   = 5;
-    private static final long BACKOFF_CAP_MS = 15_000;
+    private static final int  QUEUE_CAPACITY      = 50_000;
+    private static final int  WORKER_COUNT         = 30;
+    private static final int  MAX_ATTEMPTS         = 2;
+    private static final long INITIAL_BACKOFF_MS   = 10_000; // 10s
 
     private final PaymentService paymentService;
     private final BlockingQueue<PaymentDTO.QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final CountDownLatch shutdownLatch = new CountDownLatch(WORKER_COUNT);
     private final List<Thread> workers = new ArrayList<>();
-    private final ScheduledExecutorService backoffScheduler =
-            new ScheduledThreadPoolExecutor(1, r -> {
-                Thread t = new Thread(r, "payment-backoff");
-                t.setDaemon(true);
-                return t;
-            });
 
     public PaymentQueue(PaymentService paymentService) {
         this.paymentService = paymentService;
@@ -78,14 +69,12 @@ public class PaymentQueue {
         log.info("PaymentQueue shutting down. queue={}", queue.size());
         running.set(false);
         try {
-            // Wait for graceful drain (best effort).
             if (!shutdownLatch.await(30, TimeUnit.SECONDS)) {
                 log.error("PaymentQueue drain timeout. lost~={}", queue.size());
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
-            backoffScheduler.shutdownNow();
             workers.forEach(Thread::interrupt);
         }
     }
@@ -108,31 +97,35 @@ public class PaymentQueue {
         }
     }
 
+    /**
+     * Process with inline retry. Thread.sleep() on a virtual thread is cheap —
+     * it yields the carrier thread, so other workers continue processing.
+     */
     private void handle(PaymentDTO.QueuedPayment item, int workerId) {
-        try {
-            boolean ok = paymentService.processPayment(item);
-            if (ok) return;
-            scheduleRetry(item, workerId);
-        } catch (Exception e) {
-            log.warn("[AUDIT] WORKER_ERROR worker-{} cid={}: {}", workerId, item.correlationId(), e.toString());
-            scheduleRetry(item, workerId);
-        }
-    }
-
-    private void scheduleRetry(PaymentDTO.QueuedPayment item, int workerId) {
-        int next = item.attempts() + 1;
-        if (next >= MAX_ATTEMPTS) {
-            log.error("[AUDIT] PERMANENT_FAILURE cid={} attempts={}", item.correlationId(), next);
-            return;
-        }
-        long delay = Math.min(1000L * (1L << item.attempts()), BACKOFF_CAP_MS);
-        PaymentDTO.QueuedPayment retry = new PaymentDTO.QueuedPayment(
-                item.correlationId(), item.amount(), item.requestedAt(), next);
-        backoffScheduler.schedule(() -> {
-            if (!queue.offer(retry)) {
-                log.error("[AUDIT] RETRY_DROPPED cid={} attempt={} (queue full)",
-                        retry.correlationId(), next);
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                boolean ok = paymentService.processPayment(item);
+                if (ok) return;
+            } catch (Exception e) {
+                log.warn("[AUDIT] WORKER_ERROR worker-{} cid={} attempt={}: {}",
+                        workerId, item.correlationId(), attempt, e.toString());
             }
-        }, delay, TimeUnit.MILLISECONDS);
+
+            if (attempt >= MAX_ATTEMPTS) {
+                log.error("[AUDIT] PERMANENT_FAILURE cid={} attempts={}", item.correlationId(), attempt);
+                return;
+            }
+
+            // Backoff: 10s, 20s (VT sleep is cheap — yields carrier thread)
+            long backoff = INITIAL_BACKOFF_MS * attempt;
+            log.warn("[AUDIT] RETRY cid={} attempt={}/{} backoff={}ms",
+                    item.correlationId(), attempt, MAX_ATTEMPTS, backoff);
+            try {
+                Thread.sleep(backoff);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 }

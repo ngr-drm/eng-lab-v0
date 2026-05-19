@@ -31,7 +31,7 @@ public class Application {
     private RestClient buildClient(String baseUrl) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(2));
-        factory.setReadTimeout(Duration.ofSeconds(5));
+        factory.setReadTimeout(Duration.ofSeconds(12));
         return RestClient.builder()
                 .baseUrl(baseUrl)
                 .requestFactory(factory)
