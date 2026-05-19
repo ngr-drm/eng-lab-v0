@@ -63,12 +63,29 @@ public class HealthCheckScheduler {
         catch (Exception e) { return new PaymentDTO.ServiceHealth(true, 9999); }
     }
 
+    /**
+     * Routing rules:
+     *  1. default failing, fallback healthy          → FALLBACK
+     *  2. both failing                               → DEFAULT (log warning, nowhere else to go)
+     *  3. default fast (RT < 150ms)                  → DEFAULT (prefer cheaper processor)
+     *  4. default slow AND fallback significantly    → FALLBACK (only if fallback is at least 2x faster)
+     *     faster
+     *  5. else                                       → DEFAULT
+     *
+     * Hysteresis: threshold at 150ms (vs 120) avoids flip-flopping when default hovers at boundary.
+     * Inverted multiplier: only switch to fallback when default.RT > fallback.RT * 2,
+     * i.e., default must be at least 2x slower to justify the more expensive processor.
+     */
     private PaymentDTO.ProcessorType decide(PaymentDTO.ServiceHealth d, PaymentDTO.ServiceHealth f) {
         if (d.failing()) {
-            return f.failing() ? PaymentDTO.ProcessorType.DEFAULT : PaymentDTO.ProcessorType.FALLBACK;
+            if (f.failing()) {
+                log.warn("[ROUTING] Both processors failing — defaulting to DEFAULT");
+                return PaymentDTO.ProcessorType.DEFAULT;
+            }
+            return PaymentDTO.ProcessorType.FALLBACK;
         }
-        if (d.minResponseTime() < 120) return PaymentDTO.ProcessorType.DEFAULT;
-        if (!f.failing() && f.minResponseTime() < d.minResponseTime() * 3) {
+        if (d.minResponseTime() < 150) return PaymentDTO.ProcessorType.DEFAULT;
+        if (!f.failing() && d.minResponseTime() > f.minResponseTime() * 2) {
             return PaymentDTO.ProcessorType.FALLBACK;
         }
         return PaymentDTO.ProcessorType.DEFAULT;
