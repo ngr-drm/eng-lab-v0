@@ -61,8 +61,8 @@ public class PaymentProcessorClient {
             return false;
         } catch (Exception e) {
             long latency = System.currentTimeMillis() - start;
-            log.warn("[AUDIT] PROCESSOR_ERROR cid={} target={} latency={}ms err={}",
-                    req.correlationId(), type, latency, e.toString());
+            log.warn("[AUDIT] PROCESSOR_ERROR cid={} target={} latency={}ms",
+                    req.correlationId(), type, latency);
             return false;
         }
     }
