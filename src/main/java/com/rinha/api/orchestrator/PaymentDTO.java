@@ -26,6 +26,14 @@ public class PaymentDTO {
             int minResponseTime
     ) {}
 
+    /** Response from GET /payments/{cid} for reconciliation */
+    public record ProcessorPaymentResponse(
+            String correlationId,
+            java.math.BigDecimal amount,
+            String requestedAt,
+            String status
+    ) {}
+
     public record SummaryEntry(
             long totalRequests,
             BigDecimal totalAmount

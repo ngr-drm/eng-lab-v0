@@ -9,29 +9,27 @@ import org.springframework.stereotype.Component;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * In-memory bounded queue with 30 virtual-thread workers.
- *  - On failure, retries inline with Thread.sleep() (cheap on VTs).
- *  - Max 2 attempts, backoff 10s then 20s — conservative to avoid saturating the processor.
- *  - VTs block naturally on queue.poll() and HTTP calls without consuming OS threads.
+ * In-memory bounded queue with 50 virtual-thread workers.
+ * Conservative retry: 1 retry after 15s (respects processor's 10s max response time).
+ * On permanent failure, reconciliation via GET /payments/{cid} before giving up.
  */
 @Component
 public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
-    private static final int  QUEUE_CAPACITY      = 50_000;
-    private static final int  WORKER_COUNT         = 30;
-    private static final int  MAX_ATTEMPTS         = 2;
-    private static final long INITIAL_BACKOFF_MS   = 10_000; // 10s
+    private static final int QUEUE_CAPACITY = 50_000;
+    private static final int WORKER_COUNT = 50;
+    private static final int MAX_ATTEMPTS = 2;  // 1 initial + 1 retry
+    private static final long RETRY_DELAY_MS = 15_000; // 15s — conservative, respects 10s processor time
 
     private final PaymentService paymentService;
     private final BlockingQueue<PaymentDTO.QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+    private final ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor(
+            r -> Thread.ofVirtual().name("retry-scheduler").unstarted(r));
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final CountDownLatch shutdownLatch = new CountDownLatch(WORKER_COUNT);
     private final List<Thread> workers = new ArrayList<>();
@@ -61,17 +59,20 @@ public class PaymentQueue {
                     .start(() -> workerLoop(id));
             workers.add(vt);
         }
-        log.info("PaymentQueue started workers={} capacity={}", WORKER_COUNT, QUEUE_CAPACITY);
+        log.info("PaymentQueue started workers={} capacity={} retryDelay={}ms",
+                WORKER_COUNT, QUEUE_CAPACITY, RETRY_DELAY_MS);
     }
 
     @PreDestroy
     public void shutdown() {
         log.info("PaymentQueue shutting down. queue={}", queue.size());
         running.set(false);
+        retryScheduler.shutdown();
         try {
             if (!shutdownLatch.await(30, TimeUnit.SECONDS)) {
                 log.error("PaymentQueue drain timeout. lost~={}", queue.size());
             }
+            retryScheduler.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
@@ -98,34 +99,48 @@ public class PaymentQueue {
     }
 
     /**
-     * Process with inline retry. Thread.sleep() on a virtual thread is cheap —
-     * it yields the carrier thread, so other workers continue processing.
+     * Process payment. On failure:
+     * - If attempts < MAX_ATTEMPTS: schedule retry after 15s (non-blocking)
+     * - If attempts >= MAX_ATTEMPTS: try reconciliation, then give up
      */
     private void handle(PaymentDTO.QueuedPayment item, int workerId) {
-        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            try {
-                boolean ok = paymentService.processPayment(item);
-                if (ok) return;
-            } catch (Exception e) {
-                log.warn("[AUDIT] WORKER_ERROR worker-{} cid={} attempt={}: {}",
-                        workerId, item.correlationId(), attempt, e.toString());
-            }
-
-            if (attempt >= MAX_ATTEMPTS) {
-                log.error("[AUDIT] PERMANENT_FAILURE cid={} attempts={}", item.correlationId(), attempt);
-                return;
-            }
-
-            // Backoff: 10s, 20s (VT sleep is cheap — yields carrier thread)
-            long backoff = INITIAL_BACKOFF_MS * attempt;
-            log.warn("[AUDIT] RETRY cid={} attempt={}/{} backoff={}ms",
-                    item.correlationId(), attempt, MAX_ATTEMPTS, backoff);
-            try {
-                Thread.sleep(backoff);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
+        try {
+            boolean ok = paymentService.processPayment(item);
+            if (ok) return;
+        } catch (Exception e) {
+            log.warn("[AUDIT] WORKER_ERROR worker-{} cid={} attempt={}: {}",
+                    workerId, item.correlationId(), item.attempts() + 1, e.toString());
         }
+
+        int currentAttempt = item.attempts() + 1;
+
+        if (currentAttempt >= MAX_ATTEMPTS) {
+            // Exhausted retries — try reconciliation before giving up
+            log.warn("[AUDIT] RETRIES_EXHAUSTED cid={} attempts={} — attempting reconciliation",
+                    item.correlationId(), currentAttempt);
+
+            boolean reconciled = paymentService.reconcile(item);
+            if (!reconciled) {
+                log.error("[AUDIT] PERMANENT_FAILURE cid={} attempts={}",
+                        item.correlationId(), currentAttempt);
+            }
+            return;
+        }
+
+        // Schedule retry after 15s (non-blocking — worker returns to poll immediately)
+        PaymentDTO.QueuedPayment retryItem = new PaymentDTO.QueuedPayment(
+                item.correlationId(), item.amount(), item.requestedAt(), currentAttempt);
+
+        retryScheduler.schedule(() -> {
+            if (running.get()) {
+                boolean offered = queue.offer(retryItem);
+                if (!offered) {
+                    log.error("[AUDIT] RETRY_QUEUE_FULL cid={}", item.correlationId());
+                }
+            }
+        }, RETRY_DELAY_MS, TimeUnit.MILLISECONDS);
+
+        log.info("[AUDIT] RETRY_SCHEDULED cid={} attempt={}/{} delay={}ms",
+                item.correlationId(), currentAttempt, MAX_ATTEMPTS, RETRY_DELAY_MS);
     }
 }

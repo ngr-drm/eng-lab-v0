@@ -4,22 +4,20 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Set;
 
 /**
  * Single ZSET ledger per processor (`payments:default:zset`, `payments:fallback:zset`).
  * Score  = epochMillis
- * Member = "<cid>:<amount>"  -> naturally idempotent.
+ * Member = "<cid>:<amount>"  -> naturally idempotent (ZADD with same member = no-op).
  *
- * Distributed idempotency via SETNX lock:idem:{cid} (TTL 30s) — prevents two instances
- * from sending the same payment to the processor concurrently.
+ * No distributed lock needed — idempotency via:
+ *   - HTTP 422 from processor (already processed)
+ *   - ZADD with same member is a no-op
  */
 @Component
 public class RedisPaymentStore {
-
-    private static final Duration IDEM_LOCK_TTL = Duration.ofSeconds(30);
 
     private final StringRedisTemplate redis;
 
@@ -31,15 +29,6 @@ public class RedisPaymentStore {
         return "payments:" + (type == PaymentDTO.ProcessorType.DEFAULT ? "default" : "fallback") + ":zset";
     }
 
-    /**
-     * Try to acquire processing lock for cid. Returns true if acquired (first to process).
-     * Returns false if another worker is already handling this cid.
-     */
-    public boolean tryAcquire(String correlationId) {
-        Boolean acquired = redis.opsForValue()
-                .setIfAbsent("lock:idem:" + correlationId, "1", IDEM_LOCK_TTL);
-        return Boolean.TRUE.equals(acquired);
-    }
 
     public void savePayment(PaymentDTO.ProcessorType type, String correlationId,
                             BigDecimal amount, Instant requestedAt) {

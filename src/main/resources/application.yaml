@@ -10,9 +10,9 @@ spring:
       port: 6379
       lettuce:
         pool:
-          max-active: 50
-          max-idle: 20
-          min-idle: 8
+          max-active: 80
+          max-idle: 30
+          min-idle: 10
   main:
     lazy-initialization: false
 
@@ -22,8 +22,8 @@ server:
   tomcat:
     threads:
       max: 200
-    accept-count: 200
-    max-connections: 8192
+    accept-count: 1000
+    max-connections: 16384
 
 spring.lifecycle.timeout-per-shutdown-phase: 30s
 

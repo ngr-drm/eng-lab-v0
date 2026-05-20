@@ -8,6 +8,8 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
+import java.util.Optional;
+
 @Component
 public class PaymentProcessorClient {
 
@@ -15,16 +17,26 @@ public class PaymentProcessorClient {
 
     private final RestClient defaultClient;
     private final RestClient fallbackClient;
+    private final RestClient defaultHealthClient;
+    private final RestClient fallbackHealthClient;
 
     public PaymentProcessorClient(
             @Qualifier("defaultProcessorClient") RestClient defaultClient,
-            @Qualifier("fallbackProcessorClient") RestClient fallbackClient) {
+            @Qualifier("fallbackProcessorClient") RestClient fallbackClient,
+            @Qualifier("defaultHealthClient") RestClient defaultHealthClient,
+            @Qualifier("fallbackHealthClient") RestClient fallbackHealthClient) {
         this.defaultClient = defaultClient;
         this.fallbackClient = fallbackClient;
+        this.defaultHealthClient = defaultHealthClient;
+        this.fallbackHealthClient = fallbackHealthClient;
     }
 
     private RestClient clientFor(PaymentDTO.ProcessorType type) {
         return type == PaymentDTO.ProcessorType.DEFAULT ? defaultClient : fallbackClient;
+    }
+
+    private RestClient healthClientFor(PaymentDTO.ProcessorType type) {
+        return type == PaymentDTO.ProcessorType.DEFAULT ? defaultHealthClient : fallbackHealthClient;
     }
 
     /**
@@ -67,9 +79,39 @@ public class PaymentProcessorClient {
         }
     }
 
+    /**
+     * Reconciliation: check if payment exists in processor via GET /payments/{cid}.
+     * Returns the payment details if found, empty if not found or error.
+     */
+    public Optional<PaymentDTO.ProcessorPaymentResponse> getPayment(PaymentDTO.ProcessorType type, String correlationId) {
+        try {
+            PaymentDTO.ProcessorPaymentResponse resp = clientFor(type)
+                    .get()
+                    .uri("/payments/{cid}", correlationId)
+                    .retrieve()
+                    .body(PaymentDTO.ProcessorPaymentResponse.class);
+            if (resp != null) {
+                log.info("[AUDIT] RECONCILIATION_FOUND cid={} target={}", correlationId, type);
+                return Optional.of(resp);
+            }
+            return Optional.empty();
+        } catch (HttpClientErrorException e) {
+            if (e.getStatusCode().value() == 404) {
+                return Optional.empty();
+            }
+            log.warn("[AUDIT] RECONCILIATION_ERROR cid={} target={} status={}",
+                    correlationId, type, e.getStatusCode().value());
+            return Optional.empty();
+        } catch (Exception e) {
+            log.warn("[AUDIT] RECONCILIATION_ERROR cid={} target={} err={}",
+                    correlationId, type, e.toString());
+            return Optional.empty();
+        }
+    }
+
     public PaymentDTO.ServiceHealth checkHealth(PaymentDTO.ProcessorType type) {
         try {
-            PaymentDTO.ServiceHealth h = clientFor(type)
+            PaymentDTO.ServiceHealth h = healthClientFor(type)
                     .get()
                     .uri("/payments/service-health")
                     .retrieve()
