@@ -10,7 +10,6 @@ import org.springframework.web.client.RestClient;
 
 import java.net.http.HttpClient;
 import java.time.Duration;
-import java.util.concurrent.Executors;
 
 @SpringBootApplication
 @EnableScheduling
@@ -42,7 +41,6 @@ public class Application {
 
     private RestClient buildPaymentClient(String baseUrl) {
         HttpClient httpClient = HttpClient.newBuilder()
-                .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .connectTimeout(Duration.ofSeconds(2))
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
@@ -58,7 +56,6 @@ public class Application {
 
     private RestClient buildHealthClient(String baseUrl) {
         HttpClient httpClient = HttpClient.newBuilder()
-                .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .connectTimeout(Duration.ofSeconds(1))
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();

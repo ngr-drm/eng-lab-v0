@@ -10,10 +10,12 @@ FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE 8080
-ENV JAVA_OPTS="-XX:+UseG1GC \
-               -XX:MaxGCPauseMillis=50 \
-               -Xms100m \
-               -Xmx100m \
+ENV JAVA_OPTS="-XX:+UseSerialGC \
+               -Xms48m \
+               -Xmx48m \
+               -XX:MaxMetaspaceSize=48m \
+               -XX:+TieredCompilation \
+               -XX:TieredStopAtLevel=1 \
                -Xss256k \
                -Djava.security.egd=file:/dev/./urandom"
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]

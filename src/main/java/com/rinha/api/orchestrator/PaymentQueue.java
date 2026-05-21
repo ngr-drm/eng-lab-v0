@@ -22,14 +22,17 @@ public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
     private static final int QUEUE_CAPACITY = 50_000;
-    private static final int WORKER_COUNT = 50;
-    private static final int MAX_ATTEMPTS = 2;  // 1 initial + 1 retry
-    private static final long RETRY_DELAY_MS = 15_000; // 15s — conservative, respects 10s processor time
+    private static final int WORKER_COUNT = 15;
+    private static final int MAX_ATTEMPTS = 3;  // 1 initial + 2 retries
+    private static final long RETRY_DELAY_MS = 5_000; // 5s — faster retry for throughput
 
     private final PaymentService paymentService;
     private final BlockingQueue<PaymentDTO.QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
-    private final ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor(
-            r -> Thread.ofVirtual().name("retry-scheduler").unstarted(r));
+    private final ScheduledExecutorService retryScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "retry-scheduler");
+        t.setDaemon(true);
+        return t;
+    });
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final CountDownLatch shutdownLatch = new CountDownLatch(WORKER_COUNT);
     private final List<Thread> workers = new ArrayList<>();
