@@ -13,18 +13,19 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * In-memory bounded queue with 50 virtual-thread workers.
- * Conservative retry: 1 retry after 15s (respects processor's 10s max response time).
- * On permanent failure, reconciliation via GET /payments/{cid} before giving up.
+ * In-memory bounded queue with virtual-thread workers.
+ * On failure: immediate reconciliation attempt (catches accepted-but-lost-response).
+ * If not reconciled: fast retry (3s) up to 2 retries.
+ * After all retries exhausted: final reconciliation before giving up.
  */
 @Component
 public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
     private static final int QUEUE_CAPACITY = 50_000;
-    private static final int WORKER_COUNT = 15;
-    private static final int MAX_ATTEMPTS = 3;  // 1 initial + 2 retries
-    private static final long RETRY_DELAY_MS = 5_000; // 5s — faster retry for throughput
+    private static final int WORKER_COUNT = 25;
+    private static final int MAX_ATTEMPTS = 2;  // 1 initial + 2 retries
+    private static final long RETRY_DELAY_MS = 3_000; // 3s — fast retry, no timeouts observed
 
     private final PaymentService paymentService;
     private final BlockingQueue<PaymentDTO.QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
@@ -51,8 +52,6 @@ public class PaymentQueue {
                 req.correlationId(), req.amount(), Instant.now(), 0));
     }
 
-    public int size() { return queue.size(); }
-
     @PostConstruct
     public void start() {
         for (int i = 0; i < WORKER_COUNT; i++) {
@@ -75,7 +74,10 @@ public class PaymentQueue {
             if (!shutdownLatch.await(30, TimeUnit.SECONDS)) {
                 log.error("PaymentQueue drain timeout. lost~={}", queue.size());
             }
-            retryScheduler.awaitTermination(5, TimeUnit.SECONDS);
+            boolean ok = retryScheduler.awaitTermination(5, TimeUnit.SECONDS);
+            if (!ok) {
+                log.warn("PaymentQueue retry scheduler did not terminate in time.");
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
@@ -103,8 +105,9 @@ public class PaymentQueue {
 
     /**
      * Process payment. On failure:
-     * - If attempts < MAX_ATTEMPTS: schedule retry after 15s (non-blocking)
-     * - If attempts >= MAX_ATTEMPTS: try reconciliation, then give up
+     * 1. Immediate reconciliation (catches accepted-but-lost-response cases)
+     * 2. If not reconciled and attempts < MAX_ATTEMPTS: schedule fast retry (3s)
+     * 3. If attempts >= MAX_ATTEMPTS: final reconciliation, then give up
      */
     private void handle(PaymentDTO.QueuedPayment item, int workerId) {
         try {
@@ -115,18 +118,19 @@ public class PaymentQueue {
                     workerId, item.correlationId(), item.attempts() + 1, e.toString());
         }
 
+        // Immediate reconciliation — processor may have accepted but response was lost
+        boolean reconciled = paymentService.reconcile(item);
+        if (reconciled) {
+            log.info("[AUDIT] IMMEDIATE_RECONCILE_OK cid={} attempt={}",
+                    item.correlationId(), item.attempts() + 1);
+            return;
+        }
+
         int currentAttempt = item.attempts() + 1;
 
-        if (currentAttempt >= MAX_ATTEMPTS) {
-            // Exhausted retries — try reconciliation before giving up
-            log.warn("[AUDIT] RETRIES_EXHAUSTED cid={} attempts={} — attempting reconciliation",
+        if (currentAttempt > MAX_ATTEMPTS) {
+            log.error("[AUDIT] PERMANENT_FAILURE cid={} attempts={}",
                     item.correlationId(), currentAttempt);
-
-            boolean reconciled = paymentService.reconcile(item);
-            if (!reconciled) {
-                log.error("[AUDIT] PERMANENT_FAILURE cid={} attempts={}",
-                        item.correlationId(), currentAttempt);
-            }
             return;
         }
 

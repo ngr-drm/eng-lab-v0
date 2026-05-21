@@ -51,7 +51,7 @@ public class Application {
                 .build();
 
         JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
-        factory.setReadTimeout(Duration.ofSeconds(12));
+        factory.setReadTimeout(Duration.ofSeconds(10));
 
         return RestClient.builder()
                 .baseUrl(baseUrl)
