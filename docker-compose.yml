@@ -8,7 +8,7 @@ x-service-templates: &instance-build
     resources:
       limits:
         cpus: "0.55"
-        memory: "130MB"
+        memory: "150MB"
   environment:
     REDIS_HOST: redis
     PROCESSOR_DEFAULT_URL: http://payment-processor-default:8080
@@ -35,7 +35,7 @@ services:
       resources:
         limits:
           cpus: "0.10"
-          memory: "20MB"
+          memory: "12MB"
 
   instance-1:
     <<: *instance-build
@@ -54,7 +54,7 @@ services:
       redis-server
       --save ""
       --appendonly no
-      --maxmemory 55mb
+      --maxmemory 30mb
       --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
@@ -69,7 +69,7 @@ services:
       resources:
         limits:
           cpus: "0.30"
-          memory: "60MB"
+          memory: "36MB"
 
 networks:
   api:

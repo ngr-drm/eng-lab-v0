@@ -11,11 +11,13 @@ WORKDIR /app
 COPY --from=build /app/target/*.jar app.jar
 EXPOSE 8080
 ENV JAVA_OPTS="-XX:+UseSerialGC \
-               -Xms48m \
-               -Xmx48m \
-               -XX:MaxMetaspaceSize=48m \
+               -Xms64m \
+               -Xmx80m \
+               -XX:MaxMetaspaceSize=80m \
+               -XX:ReservedCodeCacheSize=24m \
                -XX:+TieredCompilation \
                -XX:TieredStopAtLevel=1 \
+               -XX:+ExitOnOutOfMemoryError \
                -Xss256k \
                -Djava.security.egd=file:/dev/./urandom"
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
