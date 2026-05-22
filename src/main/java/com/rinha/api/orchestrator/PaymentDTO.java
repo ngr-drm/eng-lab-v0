@@ -47,11 +47,9 @@ public class PaymentDTO {
     /** Routing decision shared via Redis (TTL 5s). */
     public record RouteDecision(ProcessorType processor, long ts) {}
 
-    /** Queue item carrying retry attempts and the original requestedAt. */
     public record QueuedPayment(
             String correlationId,
             BigDecimal amount,
-            Instant requestedAt,
-            int attempts
+            Instant requestedAt
     ) {}
 }

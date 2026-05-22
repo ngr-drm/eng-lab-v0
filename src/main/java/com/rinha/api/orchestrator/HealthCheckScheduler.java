@@ -71,9 +71,9 @@ public class HealthCheckScheduler {
      *  4. default slow AND fallback significantly    → FALLBACK (only if fallback is at least 2x faster)
      *     faster
      *  5. else                                       → DEFAULT
-     *
+
      * Hysteresis: threshold at 150ms (vs 120) avoids flip-flopping when default hovers at boundary.
-     * Inverted multiplier: only switch to fallback when default.RT > fallback.RT * 2,
+     * Inverted multiplier: only switch to fallback when default.RT > fallback.RT.
      * i.e., default must be at least 2x slower to justify the more expensive processor.
      */
     private PaymentDTO.ProcessorType decide(PaymentDTO.ServiceHealth d, PaymentDTO.ServiceHealth f) {
