@@ -107,7 +107,7 @@ public class PaymentQueue {
                     workerId, item.correlationId(), e.toString());
         }
 
-        // Schedule retry after 15s (non-blocking — worker returns to poll immediately)
+        // Schedule retry after 5s (non-blocking — worker returns to poll immediately)
         PaymentDTO.QueuedPayment retryItem = new PaymentDTO.QueuedPayment(
                 item.correlationId(), item.amount(), item.requestedAt());
 
