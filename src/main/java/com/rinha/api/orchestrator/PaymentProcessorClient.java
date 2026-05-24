@@ -79,36 +79,6 @@ public class PaymentProcessorClient {
         }
     }
 
-    /**
-     * Reconciliation: check if payment exists in processor via GET /payments/{cid}.
-     * Returns the payment details if found, empty if not found or error.
-     */
-    public Optional<PaymentDTO.ProcessorPaymentResponse> getPayment(PaymentDTO.ProcessorType type, String correlationId) {
-        try {
-            PaymentDTO.ProcessorPaymentResponse resp = clientFor(type)
-                    .get()
-                    .uri("/payments/{cid}", correlationId)
-                    .retrieve()
-                    .body(PaymentDTO.ProcessorPaymentResponse.class);
-            if (resp != null) {
-                log.info("[AUDIT] RECONCILIATION_FOUND cid={} target={}", correlationId, type);
-                return Optional.of(resp);
-            }
-            return Optional.empty();
-        } catch (HttpClientErrorException e) {
-            if (e.getStatusCode().value() == 404) {
-                return Optional.empty();
-            }
-            log.warn("[AUDIT] RECONCILIATION_ERROR cid={} target={} status={}",
-                    correlationId, type, e.getStatusCode().value());
-            return Optional.empty();
-        } catch (Exception e) {
-            log.warn("[AUDIT] RECONCILIATION_ERROR cid={} target={} err={}",
-                    correlationId, type, e.toString());
-            return Optional.empty();
-        }
-    }
-
     public PaymentDTO.ServiceHealth checkHealth(PaymentDTO.ProcessorType type) {
         try {
             PaymentDTO.ServiceHealth h = healthClientFor(type)

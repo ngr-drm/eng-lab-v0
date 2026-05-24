@@ -28,20 +28,12 @@ public class PaymentService {
      * Returns false if it should retry.
      */
     public boolean processPayment(PaymentDTO.QueuedPayment item) {
-        // requestedAt is the ADMISSION time (captured once in PaymentQueue.offer) and reused
-        // across every retry of the same item. This guarantees that:
-        //   - The processor stores requestedAt = T_admission on the first attempt that
-        //     succeeds (200).
-        //   - Subsequent retries that receive 422 (already processed) ZADD the local ledger
-        //     with the SAME T_admission → the ZSET score matches what the processor has.
-        //   - If the processor accepted on attempt N-1 but we only confirm via 422 on attempt
-        //     N (e.g. network blip on the response path), both sides still carry an identical
-        //     timestamp → no audit drift on window boundaries.
-        // Differs from the TS reference because our retry path is asynchronous (separate
-        // scheduler) instead of in-flight semaphore-bounded single-flight per cid; with
-        // per-attempt Instant.now() the ledger score would diverge from the processor's
-        // canonical requestedAt on 422-confirmation retries.
-        Instant requestedAt = item.requestedAt();
+        // requestedAt is captured at processor-call time (per-attempt), not at admission.
+        // This guarantees the timestamp sent to the processor matches the one persisted
+        // in the local ledger for the SAME successful attempt, eliminating drift caused
+        // by retries (when a payment is enqueued at T0 but only succeeds at T0+Δ).
+        // Mirrors the reference implementation (queueWorker.ts: requestedAt = new Date()).
+        Instant requestedAt = Instant.now();
         PaymentDTO.ProcessorType target = healthScheduler.currentRoute();
 
         PaymentDTO.ProcessorPaymentRequest pReq = new PaymentDTO.ProcessorPaymentRequest(
@@ -49,9 +41,6 @@ public class PaymentService {
 
         boolean accepted = processorClient.processPayment(target, pReq);
         if (!accepted) {
-            // Reactive circuit breaker: notify the health scheduler so other workers can
-            // switch route immediately, instead of waiting for the next 5s health poll.
-            healthScheduler.reportFailure(target);
             return false;
         }
 
