@@ -22,9 +22,13 @@ server:
   shutdown: graceful
   tomcat:
     threads:
-      max: 50
-    accept-count: 256
-    max-connections: 1024
+      # With spring.threads.virtual.enabled=true this is a concurrency semaphore
+      # over virtual-thread workers, not a real thread pool. Keep it high so we
+      # do not artificially throttle inbound POST /payments under burst load
+      # (603 VUs). VTs are cheap; the real bottleneck is CPU, not this limit.
+      max: 300
+    accept-count: 500
+    max-connections: 2048
 
 spring.lifecycle.timeout-per-shutdown-phase: 30s
 
@@ -41,4 +45,7 @@ logging:
     name: audit.log
   level:
     root: WARN
-    com.rinha: INFO
+    # Keep at WARN under load: every INFO line is a synchronous disk write,
+    # which pins the virtual-thread carrier (only 8 carriers on the M1).
+    # Flip to INFO locally for debugging.
+    com.rinha: WARN

@@ -34,8 +34,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: "12MB"
+          cpus: "0.20"
+          memory: "20MB"
 
   instance-1:
     <<: *instance-build
@@ -68,8 +68,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.30"
-          memory: "36MB"
+          cpus: "0.20"
+          memory: "30MB"
 
 networks:
   api:
