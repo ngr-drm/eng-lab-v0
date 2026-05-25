@@ -17,9 +17,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
-    private static final int QUEUE_CAPACITY = 50_000;
-    private static final int WORKER_COUNT = 25;
-    private static final long RETRY_DELAY_MS = 5_000;
+    private static final int QUEUE_CAPACITY = 500;
+    private static final int WORKER_COUNT = 20;
+    private static final long RETRY_DELAY_MS = 30_000;
 
     private final PaymentService paymentService;
     private final BlockingQueue<PaymentDTO.QueuedPayment> queue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
@@ -107,7 +107,6 @@ public class PaymentQueue {
                     workerId, item.correlationId(), e.toString());
         }
 
-        // Schedule retry after 5s (non-blocking — worker returns to poll immediately)
         PaymentDTO.QueuedPayment retryItem = new PaymentDTO.QueuedPayment(
                 item.correlationId(), item.amount(), item.requestedAt());
 
