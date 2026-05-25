@@ -28,12 +28,10 @@ public class PaymentService {
      * Returns false if it should retry.
      */
     public boolean processPayment(PaymentDTO.QueuedPayment item) {
-        // requestedAt is captured at processor-call time (per-attempt), not at admission.
-        // This guarantees the timestamp sent to the processor matches the one persisted
-        // in the local ledger for the SAME successful attempt, eliminating drift caused
-        // by retries (when a payment is enqueued at T0 but only succeeds at T0+Δ).
-        // Mirrors the reference implementation (queueWorker.ts: requestedAt = new Date()).
-        Instant requestedAt = Instant.now();
+        // Use admission-time requestedAt (stable across retries) to ensure the timestamp
+        // sent to the processor matches what we persist locally. If a retry confirms via
+        // 422 (processor already has it), we ZADD with the same score the processor used.
+        Instant requestedAt = item.requestedAt();
         PaymentDTO.ProcessorType target = healthScheduler.currentRoute();
 
         PaymentDTO.ProcessorPaymentRequest pReq = new PaymentDTO.ProcessorPaymentRequest(
@@ -41,6 +39,8 @@ public class PaymentService {
 
         boolean accepted = processorClient.processPayment(target, pReq);
         if (!accepted) {
+            // Trigger reactive circuit breaker: other workers will deflect immediately
+            healthScheduler.reportFailure(target);
             return false;
         }
 
