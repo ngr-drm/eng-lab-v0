@@ -55,18 +55,6 @@ public class PaymentService {
         }
     }
 
-    private void saveReconciled(PaymentDTO.ProcessorType type,
-                                PaymentDTO.QueuedPayment item,
-                                PaymentDTO.ProcessorPaymentResponse resp) {
-        try {
-            redisStore.savePayment(type, item.correlationId(), item.amount(), item.requestedAt());
-            log.info("[AUDIT] RECONCILED cid={} target={}", item.correlationId(), type);
-        } catch (Exception e) {
-            log.error("[AUDIT] RECONCILE_LEDGER_FAIL cid={} target={} err={}",
-                    item.correlationId(), type, e.toString());
-        }
-    }
-
     public PaymentDTO.PaymentSummaryResponse getPaymentsSummary(Instant from, Instant to) {
         PaymentDTO.SummaryEntry def = redisStore.getSummary(PaymentDTO.ProcessorType.DEFAULT, from, to);
         PaymentDTO.SummaryEntry fb  = redisStore.getSummary(PaymentDTO.ProcessorType.FALLBACK, from, to);
