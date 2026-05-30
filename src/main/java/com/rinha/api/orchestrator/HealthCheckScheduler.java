@@ -99,7 +99,7 @@ public class HealthCheckScheduler {
             }
             return PaymentDTO.ProcessorType.FALLBACK;
         }
-        if (d.minResponseTime() < 150) return PaymentDTO.ProcessorType.DEFAULT;
+        if (d.minResponseTime() <= 100) return PaymentDTO.ProcessorType.DEFAULT;
         if (!f.failing() && d.minResponseTime() > f.minResponseTime() * 2) {
             return PaymentDTO.ProcessorType.FALLBACK;
         }

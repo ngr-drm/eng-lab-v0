@@ -17,8 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class PaymentQueue {
     private static final Logger log = LoggerFactory.getLogger(PaymentQueue.class);
 
-    private static final int QUEUE_CAPACITY = 500;
-    private static final int WORKER_COUNT = 20;
+    private static final int QUEUE_CAPACITY = 256;
+    private static final int WORKER_COUNT = 50;
     private static final long RETRY_DELAY_MS = 30_000;
 
     private final PaymentService paymentService;
